@@ -125,7 +125,7 @@ function App() {
     if (isLoading || rawAirports.length === 0) return;
 
     const initializeSimulation = async () => {
-      const { SimulationState } = await loadWasm();
+      const { SimulationState, create_simulation_state } = await loadWasm();
 
       // Project nodes to grid coordinates [0, gridWidth] x [0, gridHeight]
       const scaled = scaleCoordinates(rawAirports, gridWidth, gridHeight, 20);
@@ -150,18 +150,25 @@ function App() {
       });
       setMappedEdges(edges);
 
-      if (edges.length === 0) return;
+      const canvas = canvasRef.current;
+      if (!canvas || edges.length === 0) return;
 
-      setLoadingMsg('Initializing Rust simulation state...');
-      const state = new SimulationState(gridWidth, gridHeight, scaled, edges, controlPointSpacing);
+      // Enable High-DPI scaling for sharp lines
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = 850 * dpr;
+      canvas.height = 850 * dpr;
 
-      // Splat nodes and convolve potential field in Wasm
+      setLoadingMsg('Initializing Rust WebGPU simulation state...');
+      
       const nodesForWasm = scaled.map(n => ({
         x: n.x,
         y: n.y,
         mass: n.degree * massScale,
+        degree: n.degree,
       }));
-      state.update_nodes(nodesForWasm);
+
+      // Call the asynchronous WebGPU constructor in Rust
+      const state = await create_simulation_state(canvas, gridWidth, gridHeight, nodesForWasm, edges, controlPointSpacing);
       state.update_physics_fields(gConstant, softening, rangeScale);
 
       simStateRef.current = state;
@@ -182,6 +189,7 @@ function App() {
       x: n.x,
       y: n.y,
       mass: n.degree * massScale,
+      degree: n.degree,
     }));
     state.update_nodes(nodesForWasm);
     state.update_physics_fields(gConstant, softening, rangeScale);
@@ -230,153 +238,18 @@ function App() {
 
   // Main Draw function
   const draw = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Clear screen with premium space dark color
-    ctx.fillStyle = '#060911';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
     const state = simStateRef.current;
     if (!state) return;
 
-    // Render layers
-    // 1. Heatmap layer
-    if (showHeatmap && heatmapOpacity > 0) {
-      const offscreen = offscreenCanvasRef.current;
-      if (offscreen) {
-        if (offscreen.width !== gridWidth || offscreen.height !== gridHeight) {
-          offscreen.width = gridWidth;
-          offscreen.height = gridHeight;
-        }
-
-        const offCtx = offscreen.getContext('2d');
-        const potential = state.get_potential_field();
-
-        if (potential && potential.length > 0 && offCtx) {
-          let minPot = Infinity;
-          let maxPot = -Infinity;
-          for (let i = 0; i < potential.length; i++) {
-            const v = potential[i];
-            if (v < minPot) minPot = v;
-            if (v > maxPot) maxPot = v;
-          }
-
-          const imgData = offCtx.createImageData(gridWidth, gridHeight);
-          const data = imgData.data;
-          const range = maxPot - minPot;
-
-          for (let i = 0; i < potential.length; i++) {
-            const val = potential[i];
-            // Normalize: potential is most negative near nodes
-            const intensity = range > 0.0001 ? (maxPot - val) / range : 0.0;
-            const idx = i * 4;
-
-            if (intensity > 0.02) {
-              const t = intensity;
-              // Radiant deep violet to bright cyan gradient glow
-              data[idx] = Math.floor(t * t * 140); // R
-              data[idx + 1] = Math.floor(t * 180 + (t > 0.6 ? (t - 0.6) * 150 : 0)); // G
-              data[idx + 2] = Math.floor(80 + t * 175); // B
-              data[idx + 3] = Math.floor(t * 230 * heatmapOpacity); // A
-            } else {
-              data[idx + 3] = 0;
-            }
-          }
-          offCtx.putImageData(imgData, 0, 0);
-
-          // Draw offscreen grid stretched smoothly onto visual canvas
-          ctx.imageSmoothingEnabled = true;
-          ctx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
-        }
-      }
-    }
-
-    const renderScale = canvas.width / gridWidth;
-
-    // 2. Straight Edges layer (underlay)
-    if (showStraightEdges && scaledNodes.length > 0) {
-      ctx.lineWidth = 0.5;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-
-      mappedEdges.forEach(edge => {
-        const src = scaledNodes[edge.source];
-        const dst = scaledNodes[edge.target];
-        if (src && dst) {
-          ctx.beginPath();
-          ctx.moveTo(src.x * renderScale, src.y * renderScale);
-          ctx.lineTo(dst.x * renderScale, dst.y * renderScale);
-          ctx.stroke();
-        }
-      });
-    }
-
-    // 3. Bundled Edges layer
-    if (showBundledEdges && mappedEdges.length > 0) {
-      const cpData = state.get_control_points();
-      const offsets = state.get_control_point_offsets();
-      const counts = state.get_control_point_counts();
-
-      if (cpData && offsets && counts) {
-        for (let e_idx = 0; e_idx < mappedEdges.length; e_idx++) {
-          const edge = mappedEdges[e_idx];
-          const isHighlighted = hoveredNodeIndex !== null &&
-            (edge.source === hoveredNodeIndex || edge.target === hoveredNodeIndex);
-
-          if (isHighlighted) {
-            ctx.lineWidth = 2.0;
-            ctx.strokeStyle = 'rgba(0, 255, 200, 0.8)';
-            ctx.shadowColor = 'rgba(0, 255, 200, 0.5)';
-            ctx.shadowBlur = 6;
-          } else {
-            ctx.lineWidth = 1.0;
-            ctx.strokeStyle = `rgba(0, 210, 255, ${edgeOpacity})`;
-            ctx.shadowBlur = 0;
-          }
-
-          const offset = offsets[e_idx];
-          const count = counts[e_idx];
-          if (offset !== undefined && count !== undefined) {
-            ctx.beginPath();
-            const startBase = 2 * offset;
-            ctx.moveTo(cpData[startBase] * renderScale, cpData[startBase + 1] * renderScale);
-
-            for (let i = 1; i < count; i++) {
-              const base = 2 * (offset + i);
-              ctx.lineTo(cpData[base] * renderScale, cpData[base + 1] * renderScale);
-            }
-            ctx.stroke();
-          }
-        }
-        ctx.shadowBlur = 0; // Reset shadow
-      }
-    }
-
-    // 4. Nodes layer
-    if (showNodes && scaledNodes.length > 0) {
-      scaledNodes.forEach((node, idx) => {
-        const isHovered = hoveredNodeIndex === idx;
-
-        // Logarithmic node radius based on degree
-        const r = Math.max(2, Math.log2(node.degree + 1) * 1.3);
-
-        ctx.beginPath();
-        ctx.arc(node.x * renderScale, node.y * renderScale, isHovered ? r + 3 : r, 0, 2 * Math.PI);
-
-        if (isHovered) {
-          ctx.fillStyle = '#00ffc8';
-          ctx.shadowColor = '#00ffc8';
-          ctx.shadowBlur = 12;
-        } else {
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
-          ctx.shadowBlur = 0;
-        }
-        ctx.fill();
-      });
-      ctx.shadowBlur = 0; // Reset shadow
-    }
+    const hNode = hoveredNodeIndex !== null ? hoveredNodeIndex : undefined;
+    state.render(
+      hNode,
+      edgeOpacity,
+      heatmapOpacity,
+      showHeatmap,
+      showNodes,
+      showBundledEdges
+    );
   };
 
   const handleMouseMove = (e) => {

@@ -1,6 +1,19 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      if (typeof GPUAdapter !== 'undefined' && GPUAdapter.prototype.requestDevice) {
+        const originalRequestDevice = GPUAdapter.prototype.requestDevice;
+        GPUAdapter.prototype.requestDevice = function(descriptor) {
+          if (descriptor && descriptor.requiredLimits) {
+            delete descriptor.requiredLimits.maxInterStageShaderComponents;
+            delete descriptor.requiredLimits.maxInterStageShaderVariables;
+            delete descriptor.requiredLimits.maxColorAttachmentBytesPerSample;
+          }
+          return originalRequestDevice.call(this, descriptor);
+        };
+      }
+    </script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

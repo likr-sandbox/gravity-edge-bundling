@@ -1,11 +1,15 @@
 use rustfft::num_complex::Complex;
 use crate::fft2d::{fft2d, ifft2d};
+use crate::webgpu::{ControlPointMeta, EdgeNodes};
+
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct Node {
     pub x: f32,
     pub y: f32,
     pub mass: f32,
+    #[serde(default)]
+    pub degree: f32,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -166,6 +170,63 @@ impl GravitySimulation {
 
     pub fn get_control_points(&self) -> &[f32] {
         &self.control_points
+    }
+
+    pub fn get_control_point_metadata(&self) -> (Vec<ControlPointMeta>, Vec<EdgeNodes>, Vec<u32>) {
+        let total_points = self.control_points.len() / 2;
+        let mut metas = vec![
+            ControlPointMeta {
+                prev_idx: -1,
+                next_idx: -1,
+                is_static: 1,
+                padding: 0,
+            };
+            total_points
+        ];
+        let mut edge_nodes = vec![
+            EdgeNodes {
+                source: 0,
+                target_node: 0,
+            };
+            total_points
+        ];
+        let mut indices = Vec::new();
+
+        for (e_idx, &offset) in self.control_point_offsets.iter().enumerate() {
+            let count = self.control_point_counts[e_idx];
+            let edge = &self.edges[e_idx];
+
+            for i in 0..count {
+                let idx = offset + i;
+                edge_nodes[idx] = EdgeNodes {
+                    source: edge.source as u32,
+                    target_node: edge.target as u32,
+                };
+
+                if i == 0 || i == count - 1 {
+                    metas[idx] = ControlPointMeta {
+                        prev_idx: -1,
+                        next_idx: -1,
+                        is_static: 1,
+                        padding: 0,
+                    };
+                } else {
+                    metas[idx] = ControlPointMeta {
+                        prev_idx: (idx - 1) as i32,
+                        next_idx: (idx + 1) as i32,
+                        is_static: 0,
+                        padding: 0,
+                    };
+                }
+
+                if i < count - 1 {
+                    indices.push(idx as u32);
+                    indices.push((idx + 1) as u32);
+                }
+            }
+        }
+
+        (metas, edge_nodes, indices)
     }
 }
 
@@ -351,7 +412,7 @@ mod tests {
     #[test]
     fn test_splatting() {
         let nodes = vec![
-            Node { x: 1.5, y: 1.5, mass: 10.0 }
+            Node { x: 1.5, y: 1.5, mass: 10.0, degree: 1.0 }
         ];
         let grid = splat_masses(4, 4, &nodes);
         assert!((grid[5] - 2.5).abs() < 1e-5);
@@ -402,8 +463,8 @@ mod tests {
     #[test]
     fn test_gravity_simulation_full() {
         let nodes = vec![
-            Node { x: 2.0, y: 2.0, mass: 100.0 },
-            Node { x: 6.0, y: 6.0, mass: 100.0 },
+            Node { x: 2.0, y: 2.0, mass: 100.0, degree: 2.0 },
+            Node { x: 6.0, y: 6.0, mass: 100.0, degree: 2.0 },
         ];
         let edges = vec![
             Edge { source: 0, target: 1 }
@@ -423,6 +484,51 @@ mod tests {
         // Control points should still be within grid bounds
         for i in 0..10 {
             assert!(sim.control_points[i] >= 0.0 && sim.control_points[i] <= 7.0);
+        }
+    }
+
+    #[test]
+    fn test_get_control_point_metadata() {
+        let nodes = vec![
+            Node { x: 0.0, y: 0.0, mass: 1.0, degree: 1.0 },
+            Node { x: 10.0, y: 0.0, mass: 1.0, degree: 1.0 },
+        ];
+        let edges = vec![
+            Edge { source: 0, target: 1 }
+        ];
+        
+        let sim = GravitySimulation::new(12, 12, nodes, edges, 4.0);
+        assert_eq!(sim.control_points.len(), 8);
+        
+        let (metas, edge_nodes, indices) = sim.get_control_point_metadata();
+        
+        assert_eq!(metas.len(), 4);
+        assert_eq!(edge_nodes.len(), 4);
+        assert_eq!(indices.len(), 6);
+        assert_eq!(indices, vec![0, 1, 1, 2, 2, 3]);
+        
+        // Check static ends
+        assert_eq!(metas[0].is_static, 1);
+        assert_eq!(metas[0].prev_idx, -1);
+        assert_eq!(metas[0].next_idx, -1);
+        
+        assert_eq!(metas[3].is_static, 1);
+        assert_eq!(metas[3].prev_idx, -1);
+        assert_eq!(metas[3].next_idx, -1);
+        
+        // Check dynamic inner points
+        assert_eq!(metas[1].is_static, 0);
+        assert_eq!(metas[1].prev_idx, 0);
+        assert_eq!(metas[1].next_idx, 2);
+        
+        assert_eq!(metas[2].is_static, 0);
+        assert_eq!(metas[2].prev_idx, 1);
+        assert_eq!(metas[2].next_idx, 3);
+        
+        // Check edge nodes info
+        for i in 0..4 {
+            assert_eq!(edge_nodes[i].source, 0);
+            assert_eq!(edge_nodes[i].target_node, 1);
         }
     }
 }

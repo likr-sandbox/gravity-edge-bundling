@@ -5,7 +5,7 @@ description: Developer guide for maintaining, testing, updating, and optimizing 
 
 # Gravity Edge Bundling Developer Guide
 
-This guide details the architecture, mathematical models, Wasm-JS data bridge, and development workflows for the FFT-based Gravity Edge Bundling application. Refer to this skill when making any modifications to the codebase to maintain design integrity and prevent regression.
+This guide details the architecture, mathematical models, WebGPU acceleration, Wasm-JS data bridge, and development workflows for the FFT-based Gravity Edge Bundling application. Refer to this skill when making any modifications to the codebase to maintain design integrity and prevent regression.
 
 ---
 
@@ -13,111 +13,118 @@ This guide details the architecture, mathematical models, Wasm-JS data bridge, a
 
 The project consists of a hybrid Rust (WebAssembly) backend and a React (Vite) frontend:
 
-- **`gravity-edge-bundling/`**: Rust Crate (compiled to WebAssembly)
-  - [`src/lib.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/lib.rs): Thin Wasm wrapper (`SimulationState`) delegating directly to the pure Rust core.
-  - [`src/simulation.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/simulation.rs): Core physics simulation containing grid splatting, FFT convolution, force fields, and spring-step calculations.
+- **`gravity-edge-bundling/`**: Rust Crate (compiled to WebAssembly / Native host)
+  - [`src/lib.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/lib.rs): Thin Wasm wrapper and `SimulationState` class orchestrating CPU & GPU pipelines.
+  - [`src/simulation.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/simulation.rs): CPU physics simulation (mass splatting, FFT 2D convolution, metadata generation).
+  - [`src/webgpu.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/webgpu.rs): WebGPU pipeline logic containing storage/uniform buffer managers, textures, compute/render pipelines, and WGSL shaders.
   - [`src/fft2d.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/src/fft2d.rs): 2D Fast Fourier Transform helper.
-  - [`tests/web.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/tests/web.rs): Wasm integration tests executed via Node.js.
+  - [`tests/webgpu_test.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/tests/webgpu_test.rs): Native WebGPU compute integration test executed on the host GPU.
+  - [`tests/web.rs`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/gravity-edge-bundling/tests/web.rs): Wasm integration tests executed via Node.js (CPU mode).
 - **`src/`**: React Visualizer Frontend
-  - [`src/App.jsx`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/src/App.jsx): Canvas-based renderer and interactive sidebar controls.
+  - [`src/App.jsx`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/src/App.jsx): Main visualizer frontend passing Canvas to the Wasm initializer and calling render steps.
   - [`src/WasmManager.js`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/src/WasmManager.js): Async loader for the WebAssembly module.
-  - [`src/DataLoader.js`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/src/DataLoader.js): CSV loader for airport and flight data, coordinates projection.
   - [`src/wasm/`](file:///home/likr/work/likr-sandbox/gravity-edge-bundling/src/wasm): Generated WebAssembly binaries and bindings.
 
 ---
 
-## 2. Mathematical Models & Physics Formulation
+## 2. Physics Simulation & WebGPU Acceleration
 
-To maintain stable simulations, adhere to these mathematical formulations:
+The physics simulation is hybrid: the CPU handles global grid mass splatting and FFT convolution, while the GPU handles control point force updates and rendering.
 
-### A. Repulsive Gravity Field
-To prevent control points from collapsing into node endpoints, the potential field generates a **repulsive** force.
-- **Potential Field $\Phi$**: Computed via 2D FFT convolution of the splatted node masses with a gravitational decay kernel.
-- **Repulsive Force $\vec{F}$**: Computed as the positive central-difference gradient of the potential field (opposite to attractive gravity):
-  $$\vec{F} = \nabla \Phi$$
-  In code:
-  $$F_x(x, y) = \frac{\Phi(x+1, y) - \Phi(x-1, y)}{2}$$
-  $$F_y(x, y) = \frac{\Phi(x, y+1) - \Phi(x, y-1)}{2}$$
+### A. Repulsive Gravity & Spring Forces
+- **Spring Forces**: Computed in the compute shader using adjacent control point coordinates:
+  $$\vec{F}_{\text{spring}} = K_{\text{spring}} \cdot (\vec{P}_{\text{prev}} + \vec{P}_{\text{next}} - 2\vec{P}_{\text{curr}})$$
+- **Gravity Forces**: Computed in the compute shader by sampling the uploaded force field texture at the control point's position.
 
-### B. Coordinate Range Scaling ($\lambda$)
-To stretch or compress the reach of the potential field, coordinates are scaled inside the kernel generation:
-$$dx_{\text{scaled}} = \frac{dx}{\lambda}, \quad dy_{\text{scaled}} = \frac{dy}{\lambda}$$
-$$K(x, y) = - \frac{G}{\sqrt{dx_{\text{scaled}}^2 + dy_{\text{scaled}}^2 + \epsilon^2}}$$
-- $\lambda = 1.0$: Default distance.
-- $\lambda > 1.0$: Broad potential field (global bundling).
-- $\lambda < 1.0$: Narrow potential field (localized bundling).
+### B. Double-Buffered Compute Pipeline
+Control point coordinates are double-buffered (`positions_a` and `positions_b`) to prevent race conditions during parallel shader execution:
+1. The compute shader reads coordinates from the source buffer and writes updated coordinates to the destination buffer.
+2. The roles of the source and destination buffers are swapped at the end of the physics step.
 
-### C. Length-based Variable Control Points
-Each edge $e$ has a variable number of control points $N_e$ determined by its original length $L_e$ and the spacing parameter $d$:
-$$N_e = \max\left(3, \left\lfloor \frac{L_e}{d} \right\rfloor + 2\right)$$
-This guarantees a minimum of 3 points (endpoints + 1 midpoint), ensuring stable simulation.
+### C. Manual Bilinear Sampling (Broad Device Compatibility)
+- **Problem**: Standard WebGPU classifies 32-bit float formats (`R32Float` and `Rg32Float`) as `UnfilterableFloat` by default. Hardware-level bilinear filtering on these formats is optional and requires the `float32-filterable` device extension, which is missing on many devices.
+- **Solution**: To guarantee 100% device compatibility, use a **Nearest** sampler and **manual bilinear interpolation** in the WGSL shaders using `textureLoad`:
+  ```wgsl
+  fn sample_force_bilinear(coords: vec2<f32>) -> vec2<f32> {
+      let size = vec2<f32>(params.grid_width, params.grid_height);
+      let pixel = coords * size - 0.5;
+      let grid_x = floor(pixel.x);
+      let grid_y = floor(pixel.y);
+      let f = fract(pixel);
+      
+      let x0 = clamp(i32(grid_x), 0, i32(params.grid_width) - 1);
+      let x1 = clamp(i32(grid_x) + 1, 0, i32(params.grid_width) - 1);
+      let y0 = clamp(i32(grid_y), 0, i32(params.grid_height) - 1);
+      let y1 = clamp(i32(grid_y) + 1, 0, i32(params.grid_height) - 1);
+      
+      let t00 = textureLoad(force_texture, vec2<i32>(x0, y0), 0).xy;
+      let t10 = textureLoad(force_texture, vec2<i32>(x1, y0), 0).xy;
+      let t01 = textureLoad(force_texture, vec2<i32>(x0, y1), 0).xy;
+      let t11 = textureLoad(force_texture, vec2<i32>(x1, y1), 0).xy;
+      
+      let top = mix(t00, t10, f.x);
+      let bottom = mix(t01, t11, f.x);
+      return mix(top, bottom, f.y);
+  }
+  ```
 
 ---
 
-## 3. High-Performance Wasm-JS Data Bridge
+## 3. WebGPU Rendering Pipeline Layout
 
-To avoid JSON/Serde serialization overhead (which degrades performance at 60fps), the Wasm-JS boundary shares layout metadata using parallel flat arrays:
+To prevent WebGPU validation errors, the render pipelines use a layout partitioned into two bind groups:
 
-1. **Coordinates**: `get_control_points() -> Vec<f32>` returns a flat array of alternating `[x, y]` coordinates.
-2. **Offsets**: `get_control_point_offsets() -> Vec<u32>` returns the starting index of each edge in the coordinate array.
-3. **Counts**: `get_control_point_counts() -> Vec<u32>` returns the number of control points ($N_e$) for each edge.
+- **Group 0 (`render_params_layout`)**: Expects `render_params_bind_group`, containing only the uniform `Params` buffer (`binding: 0`).
+- **Group 1 (`render_resources_layout`)**: Expects `render_bind_group`, containing textures, samplers, and storage buffers for vertex/fragment rendering.
 
-### Drawing Loop in React:
-```javascript
-const cpData = state.get_control_points();
-const offsets = state.get_control_point_offsets();
-const counts = state.get_control_point_counts();
-
-for (let e_idx = 0; e_idx < mappedEdges.length; e_idx++) {
-  const offset = offsets[e_idx];
-  const count = counts[e_idx];
-  
-  ctx.beginPath();
-  ctx.moveTo(cpData[offset * 2] * scale, cpData[offset * 2 + 1] * scale);
-  
-  for (let i = 1; i < count; i++) {
-    const base = (offset + i) * 2;
-    ctx.lineTo(cpData[base] * scale, cpData[base + 1] * scale);
-  }
-  ctx.stroke();
-}
+### Render Draw Loop
+During rendering, configure the pipelines and bind groups sequentially:
+```rust
+render_pass.set_pipeline(heatmap_pipeline);
+render_pass.set_bind_group(0, &self.render_params_bind_group, &[]);
+render_pass.set_bind_group(1, &self.render_bind_group, &[]);
+render_pass.draw(0..6, 0..1);
 ```
 
 ---
 
-## 4. React Rendering & Animation Loop Guidelines
+## 4. Headless Execution & Command-Line Testing
 
-When updating the React frontend, prevent stale closures inside the `requestAnimationFrame` loop by using `useRef` to store state updates:
-
-- **State Caching**: Use Refs like `isPlayingRef` and `paramsRef` to cache physical values (`springK`, `dt`, `damping`) and run states.
-- **Rendering Caching**: Store the draw function itself in a ref (`drawRef.current = draw`) so the animation loop always executes the latest closure.
+To make WebGPU testable on native host platforms without a display/window:
+1. **`WgpuContext::new_headless`**: Instantiates a GPU context with `surface`, `config`, and rendering pipelines set to `None`.
+2. **Readback Staging Buffers**: `WgpuContext::read_positions` copies positions to a staging buffer with `MAP_READ` usage and maps it using a standard channel:
+   ```rust
+   let (tx, rx) = std::sync::mpsc::channel();
+   buffer_slice.map_async(wgpu::MapMode::Read, move |v| { let _ = tx.send(v); });
+   self.device.poll(wgpu::Maintain::Wait);
+   rx.recv().unwrap().unwrap();
+   ```
 
 ---
 
 ## 5. Development & Testing Commands
 
-Before committing any modifications, verify build and test compliance.
+Always verify builds and tests before compiling binding modules.
 
-### A. Run Pure Rust Unit Tests
-Always keep simulation math testable on host CPU.
+### A. Run Native Host Tests (CPU and GPU Headless)
+Verify the WebGPU compute shader compiles and moves points correctly on the local GPU:
+```bash
+cargo test --test webgpu_test --manifest-path gravity-edge-bundling/Cargo.toml -- --nocapture
+```
+For general CPU tests:
 ```bash
 cargo test --manifest-path gravity-edge-bundling/Cargo.toml
 ```
 
-### B. Run Wasm Node.js Integration Tests
-Verify the JS-to-Wasm bridge under a Node.js test environment.
-```bash
-npx wasm-pack test --node gravity-edge-bundling
-```
-
-### C. Compile WebAssembly Module
-Compile and output Wasm bindings directly into the React source folder.
+### B. Compile WebAssembly Module
+Compile the Rust crate to Wasm and output bindings into the React source folder:
 ```bash
 npx wasm-pack build --target web --out-dir ../src/wasm gravity-edge-bundling
 ```
 
-### D. Build Production Client Bundle
-Verify Vite compiles and packages everything successfully.
+### C. Run Local Visualizer
+Start the Vite development server to launch the visualizer:
 ```bash
-npm run build
+npm run dev
 ```
+*(Note: If changes to the Wasm bindings are not reflected in the browser, delete `.vite/deps` cache and force a hard reload of the page).*
