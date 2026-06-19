@@ -101,8 +101,8 @@ impl SimulationState {
         self.sync_gpu_buffers();
     }
     
-    pub fn update_physics_fields(&mut self, g_constant: f32, softening_epsilon: f32, range_scale: f32) {
-        self.inner.update_physics_fields(g_constant, softening_epsilon, range_scale);
+    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32) {
+        self.inner.update_physics_fields(gravity_param, softening_epsilon);
         
         if let Some(ctx) = &mut self.wgpu_ctx {
             ctx.update_force_field(&self.inner.force_field_x, &self.inner.force_field_y);

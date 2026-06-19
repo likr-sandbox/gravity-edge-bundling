@@ -34,7 +34,9 @@ The physics simulation is hybrid: the CPU handles global grid mass splatting and
 ### A. Repulsive Gravity & Spring Forces
 - **Spring Forces**: Computed in the compute shader using adjacent control point coordinates:
   $$\vec{F}_{\text{spring}} = K_{\text{spring}} \cdot (\vec{P}_{\text{prev}} + \vec{P}_{\text{next}} - 2\vec{P}_{\text{curr}})$$
-- **Gravity Forces**: Computed in the compute shader by sampling the uploaded force field texture at the control point's position.
+- **Gravity Forces**: Computed in the compute shader by sampling the uploaded force field texture at the control point's position. The potential field is generated on the CPU using the unified gravity parameter $P$ ($P = 2^x$ in React UI, where $x \in [-12.0, 0.0]$) and softening factor $\epsilon$:
+  $$K(d) = - \frac{P}{\sqrt{d^2 + \epsilon^2}}$$
+  Note that the "Node Mass Scale" parameter is fixed at `15.0` on the frontend before uploading node masses to the simulation.
 
 ### B. Double-Buffered Compute Pipeline
 Control point coordinates are double-buffered (`positions_a` and `positions_b`) to prevent race conditions during parallel shader execution:
@@ -128,3 +130,19 @@ Start the Vite development server to launch the visualizer:
 npm run dev
 ```
 *(Note: If changes to the Wasm bindings are not reflected in the browser, delete `.vite/deps` cache and force a hard reload of the page).*
+
+---
+
+## 6. Simulation API & Parameters Reference
+
+When modifying UI controls or simulation steps, pay close attention to the parameters API:
+
+### A. Wasm Binding Methods (SimulationState)
+- **`update_physics_fields(gravity_param: f32, softening_epsilon: f32)`**:
+  - `gravity_param`: Unified gravity parameter $P$ (usually set as $2^x$ from React UI, where $x \in [-12.0, 0.0]$).
+  - `softening_epsilon`: Smoothing parameter to prevent singularity when points overlap.
+- **`step(spring_k: f32, dt: f32, damping: f32)`**: Runs a simulation frame.
+
+### B. Node Mass Preparation
+- Node masses are scaled on the frontend before being passed to the Wasm simulation:
+  `mass = degree * 15.0` (The mass scale factor is fixed at `15.0` to simplify user parameters).

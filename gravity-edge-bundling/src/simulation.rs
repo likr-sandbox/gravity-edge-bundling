@@ -95,12 +95,12 @@ impl GravitySimulation {
         self.control_point_counts = control_point_counts;
     }
 
-    pub fn update_physics_fields(&mut self, g_constant: f32, softening_epsilon: f32, range_scale: f32) {
+    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32) {
         // Bilinear splatting of node masses to the grid
         let mass_grid = splat_masses(self.width, self.height, &self.nodes);
         
-        // Generate potential decay kernel with range scaling
-        let kernel_padded = generate_kernel_padded(self.width, self.height, g_constant, softening_epsilon, range_scale);
+        // Generate potential decay kernel
+        let kernel_padded = generate_kernel_padded(self.width, self.height, gravity_param, softening_epsilon);
         
         // 2D FFT Convolution to compute potential field
         self.potential_field = convolve_fft(self.width, self.height, &mass_grid, &kernel_padded);
@@ -262,9 +262,8 @@ pub fn splat_masses(width: usize, height: usize, nodes: &[Node]) -> Vec<f32> {
 pub fn generate_kernel_padded(
     width: usize,
     height: usize,
-    g_constant: f32,
+    gravity_param: f32,
     softening_epsilon: f32,
-    range_scale: f32,
 ) -> Vec<f32> {
     let pw = 2 * width;
     let ph = 2 * height;
@@ -275,13 +274,8 @@ pub fn generate_kernel_padded(
             let dx = if x < width { x as f32 } else { (x as f32) - (pw as f32) };
             let dy = if y < height { y as f32 } else { (y as f32) - (ph as f32) };
             
-            // Scale coordinate distance by range_scale (prevent zero division by clamping range_scale)
-            let rs = range_scale.max(1e-4);
-            let dx_scaled = dx / rs;
-            let dy_scaled = dy / rs;
-            
-            let dist_sq = dx_scaled * dx_scaled + dy_scaled * dy_scaled + softening_epsilon * softening_epsilon;
-            kernel[y * pw + x] = -g_constant / dist_sq.sqrt();
+            let dist_sq = dx * dx + dy * dy + softening_epsilon * softening_epsilon;
+            kernel[y * pw + x] = -gravity_param / dist_sq.sqrt();
         }
     }
     
@@ -478,7 +472,7 @@ mod tests {
         assert_eq!(sim.control_point_offsets[0], 0);
         assert_eq!(sim.control_point_counts[0], 5);
         
-        sim.update_physics_fields(0.1, 1.0, 1.0);
+        sim.update_physics_fields(0.1, 1.0);
         sim.step(0.1, 0.5, 0.9);
         
         // Control points should still be within grid bounds

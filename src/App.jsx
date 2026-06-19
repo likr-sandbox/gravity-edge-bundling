@@ -10,11 +10,10 @@ function App() {
   // Simulation parameters
   const [gridWidth, setGridWidth] = useState(256);
   const [gridHeight, setGridHeight] = useState(256);
-  const [gConstant, setGConstant] = useState(0.04);
+  const [gravityExponent, setGravityExponent] = useState(-5.0);
   const [softening, setSoftening] = useState(8.0);
-  const [rangeScale, setRangeScale] = useState(1.0);
+  const gravityParam = useMemo(() => Math.pow(2, gravityExponent), [gravityExponent]);
   const [springK, setSpringK] = useState(0.06); // "光の速度" parameter
-  const [massScale, setMassScale] = useState(15.0);
   const [controlPointSpacing, setControlPointSpacing] = useState(15.0);
   const [dt, setDt] = useState(0.6);
   const [damping, setDamping] = useState(0.95);
@@ -159,17 +158,17 @@ function App() {
       canvas.height = 850 * dpr;
 
       setLoadingMsg('Initializing Rust WebGPU simulation state...');
-      
+
       const nodesForWasm = scaled.map(n => ({
         x: n.x,
         y: n.y,
-        mass: n.degree * massScale,
+        mass: n.degree * 15.0,
         degree: n.degree,
       }));
 
       // Call the asynchronous WebGPU constructor in Rust
       const state = await create_simulation_state(canvas, gridWidth, gridHeight, nodesForWasm, edges, controlPointSpacing);
-      state.update_physics_fields(gConstant, softening, rangeScale);
+      state.update_physics_fields(gravityParam, softening);
 
       simStateRef.current = state;
       stepCountRef.current = 0;
@@ -188,13 +187,13 @@ function App() {
     const nodesForWasm = scaledNodes.map(n => ({
       x: n.x,
       y: n.y,
-      mass: n.degree * massScale,
+      mass: n.degree * 15.0,
       degree: n.degree,
     }));
     state.update_nodes(nodesForWasm);
-    state.update_physics_fields(gConstant, softening, rangeScale);
+    state.update_physics_fields(gravityParam, softening);
     drawRef.current?.();
-  }, [gConstant, softening, rangeScale, massScale, scaledNodes]);
+  }, [gravityParam, softening, scaledNodes]);
 
   // Animation frame loop
   useEffect(() => {
@@ -355,16 +354,16 @@ function App() {
             <div className="control-group">
               <div className="control-item">
                 <div className="control-label">
-                  <span>万有引力定数 G (Gravity)</span>
-                  <span className="control-value">{gConstant.toFixed(4)}</span>
+                  <span>重力パラメータ P (2^x)</span>
+                  <span className="control-value">{gravityParam.toFixed(5)} (x = {gravityExponent.toFixed(1)})</span>
                 </div>
                 <input
                   type="range"
-                  min="0.0001"
-                  max="0.15"
-                  step="0.0001"
-                  value={gConstant}
-                  onChange={(e) => setGConstant(parseFloat(e.target.value))}
+                  min="-12.0"
+                  max="0.0"
+                  step="0.1"
+                  value={gravityExponent}
+                  onChange={(e) => setGravityExponent(parseFloat(e.target.value))}
                 />
               </div>
 
@@ -385,46 +384,16 @@ function App() {
 
               <div className="control-item">
                 <div className="control-label">
-                  <span>重力影響範囲 (Range Scale)</span>
-                  <span className="control-value">{rangeScale.toFixed(2)}</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.01"
-                  max="3.0"
-                  step="0.01"
-                  value={rangeScale}
-                  onChange={(e) => setRangeScale(parseFloat(e.target.value))}
-                />
-              </div>
-
-              <div className="control-item">
-                <div className="control-label">
                   <span>光の速度 (バネ定数 k)</span>
                   <span className="control-value">{springK.toFixed(3)}</span>
                 </div>
                 <input
                   type="range"
                   min="0.01"
-                  max="0.5"
+                  max="1.0"
                   step="0.005"
                   value={springK}
                   onChange={(e) => setSpringK(parseFloat(e.target.value))}
-                />
-              </div>
-
-              <div className="control-item">
-                <div className="control-label">
-                  <span>ノードの質量係数</span>
-                  <span className="control-value">{massScale.toFixed(1)}</span>
-                </div>
-                <input
-                  type="range"
-                  min="1.0"
-                  max="50.0"
-                  step="1.0"
-                  value={massScale}
-                  onChange={(e) => setMassScale(parseFloat(e.target.value))}
                 />
               </div>
             </div>
@@ -449,6 +418,7 @@ function App() {
                   <option value="256">256 x 256</option>
                   <option value="512">512 x 512</option>
                   <option value="1024">1024 x 1024</option>
+                  <option value="2048">2048 x 2048</option>
                 </select>
               </div>
 
