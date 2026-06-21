@@ -95,12 +95,11 @@ impl GravitySimulation {
         self.control_point_counts = control_point_counts;
     }
 
-    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32, gravity_alpha: f32) {
+    pub fn update_physics_fields(&mut self, gravity_param: f32, potential_max: f32, gravity_alpha: f32) {
         // Compute resolution-independent scaling factor relative to baseline of 256
         let scale = self.width as f32 / 256.0;
         
-        // Scale softening epsilon proportionally with resolution
-        let softening_scaled = softening_epsilon * scale;
+        let potential_max_scaled = (potential_max / scale).max(1e-5);
         
         let mut potential = vec![0.0; self.width * self.height];
         let mut fx = vec![0.0; self.width * self.height];
@@ -119,6 +118,7 @@ impl GravitySimulation {
                     let dx = px - node.x;
                     let dy = py - node.y;
                     let d = (dx * dx + dy * dy).sqrt();
+                    let softening_scaled = (gravity_param * node.mass) / potential_max_scaled;
                     let denom = (d - gravity_alpha * node.mass).max(softening_scaled);
                     
                     pot_sum -= (gravity_param * node.mass) / denom;
@@ -295,7 +295,7 @@ pub fn generate_kernel_padded(
     width: usize,
     height: usize,
     gravity_param: f32,
-    softening_epsilon: f32,
+    potential_max: f32,
 ) -> Vec<f32> {
     let pw = 2 * width;
     let ph = 2 * height;
@@ -306,8 +306,13 @@ pub fn generate_kernel_padded(
             let dx = if x < width { x as f32 } else { (x as f32) - (pw as f32) };
             let dy = if y < height { y as f32 } else { (y as f32) - (ph as f32) };
             
-            let dist_sq = dx * dx + dy * dy + softening_epsilon * softening_epsilon;
-            kernel[y * pw + x] = -gravity_param / dist_sq.sqrt();
+            let d = (dx * dx + dy * dy).sqrt();
+            let term = if d <= 0.0 {
+                potential_max
+            } else {
+                (gravity_param / d).min(potential_max)
+            };
+            kernel[y * pw + x] = -term;
         }
     }
     
@@ -504,7 +509,7 @@ mod tests {
         assert_eq!(sim.control_point_offsets[0], 0);
         assert_eq!(sim.control_point_counts[0], 5);
         
-        sim.update_physics_fields(0.1, 1.0, 0.0);
+        sim.update_physics_fields(0.1, 16.0, 0.0);
         sim.step(0.1, 0.5, 0.9);
         
         // Control points should still be within grid bounds
@@ -576,7 +581,7 @@ mod tests {
         // denom = max(-5.0, softening_scaled) = 0.015625.
         // pot_sum = -1.0 * 10.0 / 0.015625 = -640.0.
         // potential at (2, 2) = pot_sum * scale = -640.0 * 0.015625 = -10.0.
-        sim.update_physics_fields(1.0, 1.0, 0.5);
+        sim.update_physics_fields(1.0, 10.0, 0.5);
         
         let pot = sim.get_potential_field();
         let idx = 2 * 4 + 2; // (2, 2)

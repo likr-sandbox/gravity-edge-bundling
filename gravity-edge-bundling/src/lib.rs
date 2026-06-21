@@ -17,7 +17,7 @@ pub struct SimulationState {
     dt: f32,
     damping: f32,
     gravity_param: f32,
-    softening_epsilon: f32,
+    potential_max: f32,
     gravity_alpha: f32,
     
     // cached render parameters
@@ -27,7 +27,6 @@ pub struct SimulationState {
     show_heatmap: bool,
     show_nodes: bool,
     show_bundled_edges: bool,
-    heatmap_limit: f32,
 }
 
 #[wasm_bindgen]
@@ -53,7 +52,7 @@ impl SimulationState {
             dt: 0.5,
             damping: 0.95,
             gravity_param: 0.03125,
-            softening_epsilon: 8.0,
+            potential_max: 16.0,
             gravity_alpha: 1.0,
             edge_opacity: 0.1,
             heatmap_opacity: 0.85,
@@ -61,7 +60,6 @@ impl SimulationState {
             show_heatmap: true,
             show_nodes: true,
             show_bundled_edges: true,
-            heatmap_limit: 0.0625,
         })
     }
 
@@ -118,12 +116,12 @@ impl SimulationState {
         self.sync_gpu_buffers();
     }
     
-    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32, gravity_alpha: f32) {
+    pub fn update_physics_fields(&mut self, gravity_param: f32, potential_max: f32, gravity_alpha: f32) {
         self.gravity_param = gravity_param;
-        self.softening_epsilon = softening_epsilon;
+        self.potential_max = potential_max;
         self.gravity_alpha = gravity_alpha;
         
-        self.inner.update_physics_fields(gravity_param, softening_epsilon, gravity_alpha);
+        self.inner.update_physics_fields(gravity_param, potential_max, gravity_alpha);
         
         if let Some(ctx) = &mut self.wgpu_ctx {
             let canvas_size = ctx.canvas_size();
@@ -139,15 +137,15 @@ impl SimulationState {
                 show_heatmap: if self.show_heatmap { 1 } else { 0 },
                 show_nodes: if self.show_nodes { 1 } else { 0 },
                 show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
-                heatmap_limit: self.heatmap_limit,
+                potential_max: self.potential_max,
                 canvas_width: canvas_size.0 as f32,
                 canvas_height: canvas_size.1 as f32,
                 gravity_param: self.gravity_param,
-                softening_epsilon: self.softening_epsilon,
                 gravity_alpha: self.gravity_alpha,
                 padding1: 0,
                 padding2: 0,
                 padding3: 0,
+                padding4: 0,
             };
             ctx.update_params(&params);
             ctx.update_physics_fields_gpu();
@@ -173,15 +171,15 @@ impl SimulationState {
                 show_heatmap: if self.show_heatmap { 1 } else { 0 },
                 show_nodes: if self.show_nodes { 1 } else { 0 },
                 show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
-                heatmap_limit: self.heatmap_limit,
+                potential_max: self.potential_max,
                 canvas_width: canvas_size.0 as f32,
                 canvas_height: canvas_size.1 as f32,
                 gravity_param: self.gravity_param,
-                softening_epsilon: self.softening_epsilon,
                 gravity_alpha: self.gravity_alpha,
                 padding1: 0,
                 padding2: 0,
                 padding3: 0,
+                padding4: 0,
             };
             ctx.update_params(&params);
             ctx.step();
@@ -199,11 +197,9 @@ impl SimulationState {
         show_heatmap: bool,
         show_nodes: bool,
         show_bundled_edges: bool,
-        heatmap_limit: f32,
     ) {
         self.edge_opacity = edge_opacity;
         self.heatmap_opacity = heatmap_opacity;
-        self.heatmap_limit = heatmap_limit;
         
         let hovered_changed = self.hovered_node != hovered_node;
         self.hovered_node = hovered_node;
@@ -229,15 +225,15 @@ impl SimulationState {
                 show_heatmap: if self.show_heatmap { 1 } else { 0 },
                 show_nodes: if self.show_nodes { 1 } else { 0 },
                 show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
-                heatmap_limit: self.heatmap_limit,
+                potential_max: self.potential_max,
                 canvas_width: canvas_size.0 as f32,
                 canvas_height: canvas_size.1 as f32,
                 gravity_param: self.gravity_param,
-                softening_epsilon: self.softening_epsilon,
                 gravity_alpha: self.gravity_alpha,
                 padding1: 0,
                 padding2: 0,
                 padding3: 0,
+                padding4: 0,
             };
             ctx.update_params(&params);
             ctx.render();
@@ -284,7 +280,7 @@ impl SimulationState {
             dt: 0.5,
             damping: 0.95,
             gravity_param: 0.03125,
-            softening_epsilon: 8.0,
+            potential_max: 16.0,
             gravity_alpha: 1.0,
             edge_opacity: 0.1,
             heatmap_opacity: 0.85,
@@ -292,7 +288,6 @@ impl SimulationState {
             show_heatmap: true,
             show_nodes: true,
             show_bundled_edges: true,
-            heatmap_limit: 0.0625,
         }
     }
 
@@ -341,7 +336,7 @@ pub async fn create_simulation_state(
         dt: 0.5,
         damping: 0.95,
         gravity_param: 0.03125,
-        softening_epsilon: 8.0,
+        potential_max: 16.0,
         gravity_alpha: 1.0,
         edge_opacity: 0.1,
         heatmap_opacity: 0.85,
@@ -349,7 +344,6 @@ pub async fn create_simulation_state(
         show_heatmap: true,
         show_nodes: true,
         show_bundled_edges: true,
-        heatmap_limit: 0.0625,
     };
     
     state.sync_gpu_buffers();

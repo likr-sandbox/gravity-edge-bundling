@@ -25,7 +25,7 @@ async fn test_webgpu_compute_step() {
     assert!(init_res.is_ok(), "Failed to initialize headless WebGPU: {:?}", init_res.err());
     
     // Upload physics fields
-    state.update_physics_fields(0.05, 1.0, 0.0);
+    state.update_physics_fields(0.05, 16.0, 0.0);
     
     // Run simulation step on GPU
     state.step(0.1, 0.5, 0.95);

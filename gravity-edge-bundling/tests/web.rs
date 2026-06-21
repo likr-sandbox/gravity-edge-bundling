@@ -26,7 +26,7 @@ fn test_state_construction_and_fields() {
     let mut state = state_res.unwrap();
     
     // Test initial fields updating
-    state.update_physics_fields(0.05, 1.0, 0.0);
+    state.update_physics_fields(0.05, 16.0, 0.0);
     assert_eq!(state.get_potential_field().len(), 64);
     
     // Test stepping simulation
@@ -58,7 +58,7 @@ fn test_simulation_state_reset_and_update() {
     let initial_points = state.get_control_points();
     
     // Run simulation step on CPU
-    state.update_physics_fields(0.05, 1.0, 0.0);
+    state.update_physics_fields(0.05, 16.0, 0.0);
     state.step(0.1, 0.5, 0.95);
     let stepped_points = state.get_control_points();
     

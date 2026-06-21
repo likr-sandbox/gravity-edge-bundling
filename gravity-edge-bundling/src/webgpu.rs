@@ -14,15 +14,15 @@ pub struct SimParams {
     pub show_heatmap: u32,
     pub show_nodes: u32,
     pub show_bundled_edges: u32,
-    pub heatmap_limit: f32,
+    pub potential_max: f32,
     pub canvas_width: f32,
     pub canvas_height: f32,
     pub gravity_param: f32,
-    pub softening_epsilon: f32,
     pub gravity_alpha: f32,
     pub padding1: u32,
     pub padding2: u32,
     pub padding3: u32,
+    pub padding4: u32,
 }
 
 #[repr(C)]
@@ -120,11 +120,10 @@ struct Params {
     show_heatmap: u32,
     show_nodes: u32,
     show_bundled_edges: u32,
-    heatmap_limit: f32,
+    potential_max: f32,
     canvas_width: f32,
     canvas_height: f32,
     gravity_param: f32,
-    softening_epsilon: f32,
     gravity_alpha: f32,
 }
 
@@ -215,11 +214,10 @@ struct Params {
     show_heatmap: u32,
     show_nodes: u32,
     show_bundled_edges: u32,
-    heatmap_limit: f32,
+    potential_max: f32,
     canvas_width: f32,
     canvas_height: f32,
     gravity_param: f32,
-    softening_epsilon: f32,
     gravity_alpha: f32,
 }
 
@@ -312,8 +310,8 @@ fn fs_heatmap(in: QuadOutput) -> @location(0) vec4<f32> {
     
     let val = sample_heatmap_bilinear(in.uv);
     var t = 0.0;
-    if (params.heatmap_limit > 0.0) {
-        t = clamp((-val) / params.heatmap_limit, 0.0, 1.0);
+    if (params.potential_max > 0.0) {
+        t = clamp((-val) / params.potential_max, 0.0, 1.0);
     }
     
     if (t <= 0.02) {
@@ -447,11 +445,10 @@ struct Params {
     show_heatmap: u32,
     show_nodes: u32,
     show_bundled_edges: u32,
-    heatmap_limit: f32,
+    potential_max: f32,
     canvas_width: f32,
     canvas_height: f32,
     gravity_param: f32,
-    softening_epsilon: f32,
     gravity_alpha: f32,
 }
 
@@ -479,7 +476,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let coords = vec2<f32>(f32(x), f32(y));
     let scale = params.grid_width / 256.0;
-    let softening_scaled = params.softening_epsilon * scale;
+    let potential_max_scaled = max(params.potential_max / scale, 1e-5);
     
     var potential = 0.0;
     var force = vec2<f32>(0.0, 0.0);
@@ -490,6 +487,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let node = nodes[i];
         let diff = coords - node.pos;
         let d = length(diff);
+        let softening_scaled = (params.gravity_param * node.mass) / potential_max_scaled;
         let denom = max(d - params.gravity_alpha * node.mass, softening_scaled);
         
         potential = potential - (params.gravity_param * node.mass) / denom;
