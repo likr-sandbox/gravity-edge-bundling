@@ -14,10 +14,22 @@ pub struct SimParams {
     pub show_heatmap: u32,
     pub show_nodes: u32,
     pub show_bundled_edges: u32,
-    pub min_potential: f32,
-    pub max_potential: f32,
+    pub heatmap_limit: f32,
     pub canvas_width: f32,
     pub canvas_height: f32,
+    pub gravity_param: f32,
+    pub softening_epsilon: f32,
+    pub gravity_alpha: f32,
+    pub padding1: u32,
+    pub padding2: u32,
+    pub padding3: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NodeSim {
+    pub pos: [f32; 2],
+    pub mass: f32,
     pub padding: u32,
 }
 
@@ -53,6 +65,7 @@ pub struct WgpuContext {
     
     // Pipelines
     compute_pipeline: wgpu::ComputePipeline,
+    gravity_pipeline: wgpu::ComputePipeline,
     heatmap_pipeline: Option<wgpu::RenderPipeline>,
     edge_pipeline: Option<wgpu::RenderPipeline>,
     node_pipeline: Option<wgpu::RenderPipeline>,
@@ -64,6 +77,7 @@ pub struct WgpuContext {
     edge_nodes_buffer: wgpu::Buffer,
     indices_buffer: wgpu::Buffer,
     nodes_buffer: wgpu::Buffer,
+    nodes_sim_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
     
     // Textures & Samplers
@@ -76,9 +90,11 @@ pub struct WgpuContext {
     // Bind Groups
     compute_bind_group_a: wgpu::BindGroup,
     compute_bind_group_b: wgpu::BindGroup,
+    gravity_bind_group: Option<wgpu::BindGroup>,
     render_bind_group: wgpu::BindGroup,
     render_params_bind_group: wgpu::BindGroup,
     
+    gravity_bind_group_layout: wgpu::BindGroupLayout,
     render_resources_layout: wgpu::BindGroupLayout,
     
     // State
@@ -104,10 +120,12 @@ struct Params {
     show_heatmap: u32,
     show_nodes: u32,
     show_bundled_edges: u32,
-    min_potential: f32,
-    max_potential: f32,
+    heatmap_limit: f32,
     canvas_width: f32,
     canvas_height: f32,
+    gravity_param: f32,
+    softening_epsilon: f32,
+    gravity_alpha: f32,
 }
 
 struct Meta {
@@ -197,10 +215,12 @@ struct Params {
     show_heatmap: u32,
     show_nodes: u32,
     show_bundled_edges: u32,
-    min_potential: f32,
-    max_potential: f32,
+    heatmap_limit: f32,
     canvas_width: f32,
     canvas_height: f32,
+    gravity_param: f32,
+    softening_epsilon: f32,
+    gravity_alpha: f32,
 }
 
 struct EdgeNodes {
@@ -291,10 +311,9 @@ fn fs_heatmap(in: QuadOutput) -> @location(0) vec4<f32> {
     }
     
     let val = sample_heatmap_bilinear(in.uv);
-    let range = params.max_potential - params.min_potential;
     var t = 0.0;
-    if (range > 0.0001) {
-        t = (params.max_potential - val) / range;
+    if (params.heatmap_limit > 0.0) {
+        t = clamp((-val) / params.heatmap_limit, 0.0, 1.0);
     }
     
     if (t <= 0.02) {
@@ -412,6 +431,82 @@ fn fs_node(in: NodeOutput) -> @location(0) vec4<f32> {
     } else {
         return vec4<f32>(1.0, 1.0, 1.0, alpha * 0.75);
     }
+}
+"#;
+
+const GRAVITY_COMPUTE_SHADER: &str = r#"
+struct Params {
+    spring_k: f32,
+    dt: f32,
+    damping: f32,
+    grid_width: f32,
+    grid_height: f32,
+    edge_opacity: f32,
+    heatmap_opacity: f32,
+    hovered_node: i32,
+    show_heatmap: u32,
+    show_nodes: u32,
+    show_bundled_edges: u32,
+    heatmap_limit: f32,
+    canvas_width: f32,
+    canvas_height: f32,
+    gravity_param: f32,
+    softening_epsilon: f32,
+    gravity_alpha: f32,
+}
+
+struct NodeSim {
+    pos: vec2<f32>,
+    mass: f32,
+    padding: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> nodes: array<NodeSim>;
+@group(0) @binding(2) var heatmap_texture: texture_storage_2d<r32float, write>;
+@group(0) @binding(3) var force_texture: texture_storage_2d<rg32float, write>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    let width = u32(params.grid_width);
+    let height = u32(params.grid_height);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    let coords = vec2<f32>(f32(x), f32(y));
+    let scale = params.grid_width / 256.0;
+    let softening_scaled = params.softening_epsilon * scale;
+    
+    var potential = 0.0;
+    var force = vec2<f32>(0.0, 0.0);
+    
+    let num_nodes = arrayLength(&nodes);
+    
+    for (var i = 0u; i < num_nodes; i = i + 1u) {
+        let node = nodes[i];
+        let diff = coords - node.pos;
+        let d = length(diff);
+        let denom = max(d - params.gravity_alpha * node.mass, softening_scaled);
+        
+        potential = potential - (params.gravity_param * node.mass) / denom;
+        
+        if (d > 0.0) {
+            if (d - params.gravity_alpha * node.mass > softening_scaled) {
+                let f_mag = (params.gravity_param * node.mass) / (denom * denom);
+                force = force + f_mag * (diff / d);
+            }
+        }
+    }
+    
+    let pot_final = potential * scale;
+    let force_final = force * scale * scale;
+    
+    textureStore(heatmap_texture, vec2<i32>(i32(x), i32(y)), vec4<f32>(pot_final, 0.0, 0.0, 0.0));
+    textureStore(force_texture, vec2<i32>(i32(x), i32(y)), vec4<f32>(force_final.x, force_final.y, 0.0, 0.0));
 }
 "#;
 
@@ -563,6 +658,13 @@ impl WgpuContext {
             mapped_at_creation: false,
         });
         
+        let nodes_sim_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Nodes Sim"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Params Uniform"),
             size: std::mem::size_of::<SimParams>() as u64,
@@ -582,7 +684,7 @@ impl WgpuContext {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let heatmap_view = heatmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -599,7 +701,7 @@ impl WgpuContext {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rg32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let force_view = force_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -671,6 +773,52 @@ impl WgpuContext {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+        
+        let gravity_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Gravity Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rg32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
                     count: None,
                 },
             ],
@@ -761,6 +909,12 @@ impl WgpuContext {
             push_constant_ranges: &[],
         });
         
+        let gravity_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Gravity Layout"),
+            bind_group_layouts: &[&gravity_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Layout"),
             bind_group_layouts: &[&render_params_layout, &render_resources_layout],
@@ -772,6 +926,18 @@ impl WgpuContext {
             label: Some("Compute Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &compute_module,
+            entry_point: "main",
+        });
+        
+        let gravity_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Gravity Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(GRAVITY_COMPUTE_SHADER.into()),
+        });
+        
+        let gravity_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Gravity Pipeline"),
+            layout: Some(&gravity_pipeline_layout),
+            module: &gravity_module,
             entry_point: "main",
         });
         
@@ -907,12 +1073,15 @@ impl WgpuContext {
             ],
         });
         
+        let gravity_bind_group = None; // Will be created when nodes are uploaded
+        
         Ok(Self {
             device,
             queue,
             surface,
             config,
             compute_pipeline,
+            gravity_pipeline,
             heatmap_pipeline,
             edge_pipeline,
             node_pipeline,
@@ -922,6 +1091,7 @@ impl WgpuContext {
             edge_nodes_buffer,
             indices_buffer,
             nodes_buffer,
+            nodes_sim_buffer,
             params_buffer,
             heatmap_texture,
             heatmap_view,
@@ -930,8 +1100,10 @@ impl WgpuContext {
             sampler,
             compute_bind_group_a,
             compute_bind_group_b,
+            gravity_bind_group,
             render_bind_group,
             render_params_bind_group,
+            gravity_bind_group_layout,
             render_resources_layout,
             is_a_source: true,
             num_control_points: 0,
@@ -1010,12 +1182,18 @@ impl WgpuContext {
         self.recreate_bind_groups();
     }
     
-    pub fn update_nodes(&mut self, node_data: &[NodeVertex]) {
+    pub fn update_nodes(&mut self, node_data: &[NodeVertex], node_sim_data: &[NodeSim]) {
         self.num_nodes = node_data.len() as u32;
         
         self.nodes_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Nodes"),
             contents: bytemuck::cast_slice(node_data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        
+        self.nodes_sim_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Nodes Sim"),
+            contents: bytemuck::cast_slice(node_sim_data),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         
@@ -1069,6 +1247,47 @@ impl WgpuContext {
                 wgpu::BindGroupEntry { binding: 5, resource: self.nodes_buffer.as_entire_binding() },
             ],
         });
+        
+        self.gravity_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Gravity BG"),
+            layout: &self.gravity_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.nodes_sim_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.heatmap_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.force_view) },
+            ],
+        }));
+    }
+    
+    pub fn update_physics_fields_gpu(&mut self) {
+        if self.num_nodes == 0 {
+            return;
+        }
+        
+        let gravity_bind_group = match &self.gravity_bind_group {
+            Some(bg) => bg,
+            None => return,
+        };
+        
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Gravity Compute Encoder"),
+        });
+        
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Gravity Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.gravity_pipeline);
+            compute_pass.set_bind_group(0, gravity_bind_group, &[]);
+            
+            let workgroup_x = (self.grid_width + 15) / 16;
+            let workgroup_y = (self.grid_height + 15) / 16;
+            compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
+        }
+        
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
     
     pub fn update_params(&mut self, params: &SimParams) {

@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 use crate::simulation::{GravitySimulation, Node, Edge};
 
-use crate::webgpu::{SimParams, NodeVertex, WgpuContext};
+use crate::webgpu::{SimParams, NodeVertex, NodeSim, WgpuContext};
 
 pub mod fft2d;
 pub mod simulation;
@@ -16,6 +16,9 @@ pub struct SimulationState {
     spring_k: f32,
     dt: f32,
     damping: f32,
+    gravity_param: f32,
+    softening_epsilon: f32,
+    gravity_alpha: f32,
     
     // cached render parameters
     edge_opacity: f32,
@@ -24,6 +27,7 @@ pub struct SimulationState {
     show_heatmap: bool,
     show_nodes: bool,
     show_bundled_edges: bool,
+    heatmap_limit: f32,
 }
 
 #[wasm_bindgen]
@@ -48,12 +52,16 @@ impl SimulationState {
             spring_k: 0.05,
             dt: 0.5,
             damping: 0.95,
+            gravity_param: 0.03125,
+            softening_epsilon: 8.0,
+            gravity_alpha: 1.0,
             edge_opacity: 0.1,
             heatmap_opacity: 0.85,
             hovered_node: None,
             show_heatmap: true,
             show_nodes: true,
             show_bundled_edges: true,
+            heatmap_limit: 0.0625,
         })
     }
 
@@ -85,7 +93,16 @@ impl SimulationState {
                     is_hovered,
                 }
             }).collect();
-            ctx.update_nodes(&node_vertices);
+            
+            let node_sims: Vec<NodeSim> = self.inner.nodes.iter().map(|n| {
+                NodeSim {
+                    pos: [n.x, n.y],
+                    mass: n.mass,
+                    padding: 0,
+                }
+            }).collect();
+            
+            ctx.update_nodes(&node_vertices, &node_sims);
         }
     }
     
@@ -101,12 +118,39 @@ impl SimulationState {
         self.sync_gpu_buffers();
     }
     
-    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32) {
-        self.inner.update_physics_fields(gravity_param, softening_epsilon);
+    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32, gravity_alpha: f32) {
+        self.gravity_param = gravity_param;
+        self.softening_epsilon = softening_epsilon;
+        self.gravity_alpha = gravity_alpha;
+        
+        self.inner.update_physics_fields(gravity_param, softening_epsilon, gravity_alpha);
         
         if let Some(ctx) = &mut self.wgpu_ctx {
-            ctx.update_force_field(&self.inner.force_field_x, &self.inner.force_field_y);
-            ctx.update_potential_heatmap(&self.inner.potential_field);
+            let canvas_size = ctx.canvas_size();
+            let params = SimParams {
+                spring_k: self.spring_k,
+                dt: self.dt,
+                damping: self.damping,
+                grid_width: self.inner.width as f32,
+                grid_height: self.inner.height as f32,
+                edge_opacity: self.edge_opacity,
+                heatmap_opacity: self.heatmap_opacity,
+                hovered_node: self.hovered_node.map(|x| x as i32).unwrap_or(-1),
+                show_heatmap: if self.show_heatmap { 1 } else { 0 },
+                show_nodes: if self.show_nodes { 1 } else { 0 },
+                show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
+                heatmap_limit: self.heatmap_limit,
+                canvas_width: canvas_size.0 as f32,
+                canvas_height: canvas_size.1 as f32,
+                gravity_param: self.gravity_param,
+                softening_epsilon: self.softening_epsilon,
+                gravity_alpha: self.gravity_alpha,
+                padding1: 0,
+                padding2: 0,
+                padding3: 0,
+            };
+            ctx.update_params(&params);
+            ctx.update_physics_fields_gpu();
         }
     }
     
@@ -116,13 +160,6 @@ impl SimulationState {
         self.damping = damping;
         
         if let Some(ctx) = &mut self.wgpu_ctx {
-            let mut min_pot = f32::INFINITY;
-            let mut max_pot = f32::NEG_INFINITY;
-            for &v in &self.inner.potential_field {
-                if v < min_pot { min_pot = v; }
-                if v > max_pot { max_pot = v; }
-            }
-            
             let canvas_size = ctx.canvas_size();
             let params = SimParams {
                 spring_k,
@@ -136,11 +173,15 @@ impl SimulationState {
                 show_heatmap: if self.show_heatmap { 1 } else { 0 },
                 show_nodes: if self.show_nodes { 1 } else { 0 },
                 show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
-                min_potential: min_pot,
-                max_potential: max_pot,
+                heatmap_limit: self.heatmap_limit,
                 canvas_width: canvas_size.0 as f32,
                 canvas_height: canvas_size.1 as f32,
-                padding: 0,
+                gravity_param: self.gravity_param,
+                softening_epsilon: self.softening_epsilon,
+                gravity_alpha: self.gravity_alpha,
+                padding1: 0,
+                padding2: 0,
+                padding3: 0,
             };
             ctx.update_params(&params);
             ctx.step();
@@ -158,9 +199,11 @@ impl SimulationState {
         show_heatmap: bool,
         show_nodes: bool,
         show_bundled_edges: bool,
+        heatmap_limit: f32,
     ) {
         self.edge_opacity = edge_opacity;
         self.heatmap_opacity = heatmap_opacity;
+        self.heatmap_limit = heatmap_limit;
         
         let hovered_changed = self.hovered_node != hovered_node;
         self.hovered_node = hovered_node;
@@ -173,13 +216,6 @@ impl SimulationState {
         }
         
         if let Some(ctx) = &mut self.wgpu_ctx {
-            let mut min_pot = f32::INFINITY;
-            let mut max_pot = f32::NEG_INFINITY;
-            for &v in &self.inner.potential_field {
-                if v < min_pot { min_pot = v; }
-                if v > max_pot { max_pot = v; }
-            }
-            
             let canvas_size = ctx.canvas_size();
             let params = SimParams {
                 spring_k: self.spring_k,
@@ -193,11 +229,15 @@ impl SimulationState {
                 show_heatmap: if self.show_heatmap { 1 } else { 0 },
                 show_nodes: if self.show_nodes { 1 } else { 0 },
                 show_bundled_edges: if self.show_bundled_edges { 1 } else { 0 },
-                min_potential: min_pot,
-                max_potential: max_pot,
+                heatmap_limit: self.heatmap_limit,
                 canvas_width: canvas_size.0 as f32,
                 canvas_height: canvas_size.1 as f32,
-                padding: 0,
+                gravity_param: self.gravity_param,
+                softening_epsilon: self.softening_epsilon,
+                gravity_alpha: self.gravity_alpha,
+                padding1: 0,
+                padding2: 0,
+                padding3: 0,
             };
             ctx.update_params(&params);
             ctx.render();
@@ -243,12 +283,16 @@ impl SimulationState {
             spring_k: 0.05,
             dt: 0.5,
             damping: 0.95,
+            gravity_param: 0.03125,
+            softening_epsilon: 8.0,
+            gravity_alpha: 1.0,
             edge_opacity: 0.1,
             heatmap_opacity: 0.85,
             hovered_node: None,
             show_heatmap: true,
             show_nodes: true,
             show_bundled_edges: true,
+            heatmap_limit: 0.0625,
         }
     }
 
@@ -296,12 +340,16 @@ pub async fn create_simulation_state(
         spring_k: 0.05,
         dt: 0.5,
         damping: 0.95,
+        gravity_param: 0.03125,
+        softening_epsilon: 8.0,
+        gravity_alpha: 1.0,
         edge_opacity: 0.1,
         heatmap_opacity: 0.85,
         hovered_node: None,
         show_heatmap: true,
         show_nodes: true,
         show_bundled_edges: true,
+        heatmap_limit: 0.0625,
     };
     
     state.sync_gpu_buffers();

@@ -10,13 +10,16 @@ function App() {
   // Simulation parameters
   const [gridWidth, setGridWidth] = useState(256);
   const [gridHeight, setGridHeight] = useState(256);
-  const [gravityExponent, setGravityExponent] = useState(-5.0);
-  const [softening, setSoftening] = useState(8.0);
-  const gravityParam = useMemo(() => Math.pow(2, gravityExponent), [gravityExponent]);
+  const [gravityExponent, setGravityExponent] = useState(-8.0);
+  const [softening, setSoftening] = useState(1.0);
+  const [gravityAlpha, setGravityAlpha] = useState(0.01);
+  const gravityParam = useMemo(() => Math.sqrt(Math.pow(2, gravityExponent)), [gravityExponent]);
   const [springK, setSpringK] = useState(0.06); // "光の速度" parameter
   const [controlPointSpacing, setControlPointSpacing] = useState(15.0);
   const [dt, setDt] = useState(0.6);
   const [damping, setDamping] = useState(0.95);
+  const [heatmapLimitExponent, setHeatmapLimitExponent] = useState(4.0);
+  const heatmapLimit = useMemo(() => Math.pow(2, heatmapLimitExponent), [heatmapLimitExponent]);
 
   // Rendering choices
   const [showHeatmap, setShowHeatmap] = useState(true);
@@ -162,13 +165,13 @@ function App() {
       const nodesForWasm = scaled.map(n => ({
         x: n.x,
         y: n.y,
-        mass: n.degree * 15.0,
+        mass: n.degree,
         degree: n.degree,
       }));
 
       // Call the asynchronous WebGPU constructor in Rust
       const state = await create_simulation_state(canvas, gridWidth, gridHeight, nodesForWasm, edges, controlPointSpacing);
-      state.update_physics_fields(gravityParam, softening);
+      state.update_physics_fields(gravityParam, softening, gravityAlpha);
 
       simStateRef.current = state;
       stepCountRef.current = 0;
@@ -182,18 +185,15 @@ function App() {
   // Recalculate potential fields when physical field parameters change (without resetting edge curves)
   useEffect(() => {
     const state = simStateRef.current;
-    if (!state || scaledNodes.length === 0) return;
-
-    const nodesForWasm = scaledNodes.map(n => ({
-      x: n.x,
-      y: n.y,
-      mass: n.degree * 15.0,
-      degree: n.degree,
-    }));
-    state.update_nodes(nodesForWasm);
-    state.update_physics_fields(gravityParam, softening);
+    if (!state) return;
+    state.update_physics_fields(gravityParam, softening, gravityAlpha);
     drawRef.current?.();
-  }, [gravityParam, softening, scaledNodes]);
+  }, [gravityParam, softening, gravityAlpha]);
+
+  // Redraw when heatmap limit changes
+  useEffect(() => {
+    drawRef.current?.();
+  }, [heatmapLimit]);
 
   // Animation frame loop
   useEffect(() => {
@@ -247,7 +247,8 @@ function App() {
       heatmapOpacity,
       showHeatmap,
       showNodes,
-      showBundledEdges
+      showBundledEdges,
+      heatmapLimit
     );
   };
 
@@ -384,6 +385,21 @@ function App() {
 
               <div className="control-item">
                 <div className="control-label">
+                  <span>重力アルファ (Gravity Alpha)</span>
+                  <span className="control-value">{gravityAlpha.toFixed(3)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.0"
+                  max="5.0"
+                  step="0.001"
+                  value={gravityAlpha}
+                  onChange={(e) => setGravityAlpha(parseFloat(e.target.value))}
+                />
+              </div>
+
+              <div className="control-item">
+                <div className="control-label">
                   <span>光の速度 (バネ定数 k)</span>
                   <span className="control-value">{springK.toFixed(3)}</span>
                 </div>
@@ -485,20 +501,37 @@ function App() {
               </div>
 
               {showHeatmap && (
-                <div className="control-item">
-                  <div className="control-label">
-                    <span>ヒートマップ不透明度</span>
-                    <span className="control-value">{Math.round(heatmapOpacity * 100)}%</span>
+                <>
+                  <div className="control-item">
+                    <div className="control-label">
+                      <span>ヒートマップ不透明度</span>
+                      <span className="control-value">{Math.round(heatmapOpacity * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={heatmapOpacity}
+                      onChange={(e) => setHeatmapOpacity(parseFloat(e.target.value))}
+                    />
                   </div>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="1.0"
-                    step="0.05"
-                    value={heatmapOpacity}
-                    onChange={(e) => setHeatmapOpacity(parseFloat(e.target.value))}
-                  />
-                </div>
+
+                  <div className="control-item">
+                    <div className="control-label">
+                      <span>ポテンシャル上限値 (2^y)</span>
+                      <span className="control-value">{heatmapLimit.toFixed(5)} (y = {heatmapLimitExponent.toFixed(1)})</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.0"
+                      max="20.0"
+                      step="0.1"
+                      value={heatmapLimitExponent}
+                      onChange={(e) => setHeatmapLimitExponent(parseFloat(e.target.value))}
+                    />
+                  </div>
+                </>
               )}
 
               <div className="toggle-item">

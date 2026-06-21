@@ -95,18 +95,50 @@ impl GravitySimulation {
         self.control_point_counts = control_point_counts;
     }
 
-    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32) {
-        // Bilinear splatting of node masses to the grid
-        let mass_grid = splat_masses(self.width, self.height, &self.nodes);
+    pub fn update_physics_fields(&mut self, gravity_param: f32, softening_epsilon: f32, gravity_alpha: f32) {
+        // Compute resolution-independent scaling factor relative to baseline of 256
+        let scale = self.width as f32 / 256.0;
         
-        // Generate potential decay kernel
-        let kernel_padded = generate_kernel_padded(self.width, self.height, gravity_param, softening_epsilon);
+        // Scale softening epsilon proportionally with resolution
+        let softening_scaled = softening_epsilon * scale;
         
-        // 2D FFT Convolution to compute potential field
-        self.potential_field = convolve_fft(self.width, self.height, &mass_grid, &kernel_padded);
+        let mut potential = vec![0.0; self.width * self.height];
+        let mut fx = vec![0.0; self.width * self.height];
+        let mut fy = vec![0.0; self.width * self.height];
         
-        // Calculate force vector fields (central difference gradient)
-        let (fx, fy) = calculate_forces(self.width, self.height, &self.potential_field);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let px = x as f32;
+                let py = y as f32;
+                
+                let mut pot_sum = 0.0;
+                let mut fx_sum = 0.0;
+                let mut fy_sum = 0.0;
+                
+                for node in &self.nodes {
+                    let dx = px - node.x;
+                    let dy = py - node.y;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    let denom = (d - gravity_alpha * node.mass).max(softening_scaled);
+                    
+                    pot_sum -= (gravity_param * node.mass) / denom;
+                    
+                    if d > 0.0 {
+                        if d - gravity_alpha * node.mass > softening_scaled {
+                            let f_mag = (gravity_param * node.mass) / (denom * denom);
+                            fx_sum += f_mag * (dx / d);
+                            fy_sum += f_mag * (dy / d);
+                        }
+                    }
+                }
+                
+                potential[y * self.width + x] = pot_sum * scale;
+                fx[y * self.width + x] = fx_sum * scale * scale;
+                fy[y * self.width + x] = fy_sum * scale * scale;
+            }
+        }
+        
+        self.potential_field = potential;
         self.force_field_x = fx;
         self.force_field_y = fy;
     }
@@ -472,7 +504,7 @@ mod tests {
         assert_eq!(sim.control_point_offsets[0], 0);
         assert_eq!(sim.control_point_counts[0], 5);
         
-        sim.update_physics_fields(0.1, 1.0);
+        sim.update_physics_fields(0.1, 1.0, 0.0);
         sim.step(0.1, 0.5, 0.9);
         
         // Control points should still be within grid bounds
@@ -524,5 +556,30 @@ mod tests {
             assert_eq!(edge_nodes[i].source, 0);
             assert_eq!(edge_nodes[i].target_node, 1);
         }
+    }
+
+    #[test]
+    fn test_pseudo_newtonian_direct_sum() {
+        let nodes = vec![
+            Node { x: 2.0, y: 2.0, mass: 10.0, degree: 1.0 },
+        ];
+        let edges = vec![
+            Edge { source: 0, target: 0 }
+        ];
+        let mut sim = GravitySimulation::new(4, 4, nodes, edges, 1.5);
+        
+        // gravity_param = 1.0, softening = 1.0, alpha = 0.5
+        // scale = 4.0 / 256.0 = 0.015625
+        // softening_scaled = 1.0 * 0.015625 = 0.015625
+        // At (2, 2), distance d = 0.0.
+        // d - alpha * mass = 0.0 - 0.5 * 10.0 = -5.0.
+        // denom = max(-5.0, softening_scaled) = 0.015625.
+        // pot_sum = -1.0 * 10.0 / 0.015625 = -640.0.
+        // potential at (2, 2) = pot_sum * scale = -640.0 * 0.015625 = -10.0.
+        sim.update_physics_fields(1.0, 1.0, 0.5);
+        
+        let pot = sim.get_potential_field();
+        let idx = 2 * 4 + 2; // (2, 2)
+        assert!((pot[idx] - (-10.0)).abs() < 1e-5);
     }
 }
