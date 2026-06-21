@@ -38,11 +38,11 @@ export function parseCSV(text) {
 }
 
 export async function loadDatasets() {
-  const airportsRes = await fetch('/airports.csv');
+  const airportsRes = await fetch(`${import.meta.env.BASE_URL}airports.csv`);
   const airportsText = await airportsRes.text();
   const airportsRaw = parseCSV(airportsText);
 
-  const flightsRes = await fetch('/flights.csv');
+  const flightsRes = await fetch(`${import.meta.env.BASE_URL}flights.csv`);
   const flightsText = await flightsRes.text();
   const flightsRaw = parseCSV(flightsText);
 
